@@ -145,25 +145,72 @@ export async function captureScreenshot(outputPath) {
 }
 
 /**
- * Capture screenshot as base64 for direct LLM consumption.
+ * Screenshot quality presets — optimized for LLM vision token efficiency.
+ *
+ * Vision models bill by resolution tile, not file size. But smaller files
+ * mean faster base64 encoding and transfer. These presets balance readability
+ * against cost.
+ *
+ *   low:    640x360  q30  ~23KB   — UI layout, button positions, rough text
+ *   medium: 960x540  q40  ~56KB   — readable body text, form fields
+ *   high:  1280x720  q50  ~111KB  — crisp text, code readability
+ *   full:  native    q75  ~1.6MB  — pixel-perfect (rarely needed)
  */
-export async function captureScreenshotBase64() {
-  const path = join(tmpdir(), `screenagent-${Date.now()}.jpg`);
+const QUALITY_PRESETS = {
+  low:    { width: 640,  height: 360, quality: 30 },
+  medium: { width: 960,  height: 540, quality: 40 },
+  high:   { width: 1280, height: 720, quality: 50 },
+  full:   { width: 0,    height: 0,   quality: 75 }, // 0 = native
+};
+
+/**
+ * Capture screenshot as base64 for direct LLM consumption.
+ * @param {'low'|'medium'|'high'|'full'} [quality='medium'] — preset name
+ */
+export async function captureScreenshotBase64(quality = 'medium') {
+  const preset = QUALITY_PRESETS[quality] || QUALITY_PRESETS.medium;
+  const rawPath = join(tmpdir(), `screenagent-raw-${Date.now()}.png`);
+  const outPath = join(tmpdir(), `screenagent-${Date.now()}.jpg`);
 
   try {
-    await execFileP('screencapture', ['-x', '-t', 'jpg', path], { timeout: 5000 });
-    const buffer = await readFile(path);
-    await unlink(path); // clean up
+    // Capture full-res PNG first
+    await execP(`screencapture -x -t png "${rawPath}"`, { timeout: 5000 });
+
+    if (preset.width > 0) {
+      // Downscale + compress with sips (macOS built-in)
+      await execFileP('sips', [
+        '-z', String(preset.height), String(preset.width),
+        '-s', 'format', 'jpeg',
+        '-s', 'formatOptions', String(preset.quality),
+        rawPath, '--out', outPath,
+      ], { timeout: 5000 });
+    } else {
+      // Full quality — just convert to JPEG
+      await execFileP('sips', [
+        '-s', 'format', 'jpeg',
+        '-s', 'formatOptions', String(preset.quality),
+        rawPath, '--out', outPath,
+      ], { timeout: 5000 });
+    }
+
+    const buffer = await readFile(outPath);
+    await unlink(rawPath).catch(() => {});
+    await unlink(outPath).catch(() => {});
 
     return {
       type: "screenshot",
       ts: Date.now(),
       format: "jpeg",
+      quality,
+      resolution: preset.width > 0 ? `${preset.width}x${preset.height}` : 'native',
       sizeBytes: buffer.length,
-      image: buffer.toString('base64')
+      sizeKB: Math.round(buffer.length / 1024),
+      image: buffer.toString('base64'),
     };
   } catch (err) {
     console.error(`Screenshot failed: ${err.message}`);
+    await unlink(rawPath).catch(() => {});
+    await unlink(outPath).catch(() => {});
     return null;
   }
 }

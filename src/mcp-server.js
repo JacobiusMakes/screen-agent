@@ -28,10 +28,15 @@ import { captureState, captureAmbient, captureScreenshot, captureScreenshotBase6
 import { moveCursor, click, typeText, keyPress, scroll, getCapabilities, getActionLog } from './input/injector.js';
 import { SessionMemory } from './state/session-memory.js';
 import { DiffEngine } from './state/diff-engine.js';
+import { TokenBudget, getBudgetPresets } from './budget/token-budget.js';
 
 // Session-level instances
 const memory = new SessionMemory({ maxEntries: 500 });
 const diffEngine = new DiffEngine();
+const budget = new TokenBudget({
+  budget: process.env.SCREEN_AGENT_BUDGET || 'normal',
+  model: process.env.SCREEN_AGENT_MODEL || 'claude-sonnet',
+});
 
 // ============================================================
 //  Tool Definitions
@@ -174,6 +179,26 @@ const TOOLS = [
       properties: {},
     },
   },
+  // ── Budget Tools ──
+  {
+    name: "get_budget",
+    description: "Get token budget status: cost so far, hourly spend rate, remaining budget, recommended capture mode. Use before expensive operations to check if you can afford a screenshot.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
+  {
+    name: "set_budget",
+    description: "Change the token budget preset. Options: 'frugal' ($0.05/hr, ambient only), 'normal' ($0.20/hr, balanced), 'rich' ($1/hr, frequent screenshots), 'unlimited'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        preset: { type: "string", enum: ["frugal", "normal", "rich", "unlimited"], description: "Budget preset" },
+      },
+      required: ["preset"],
+    },
+  },
 ];
 
 // ============================================================
@@ -185,8 +210,9 @@ async function handleGetScreenState() {
   if (!state) {
     return "Error: Could not capture screen state. Check Accessibility permissions.";
   }
-  // Auto-record to session memory
+  // Auto-record to session memory + budget
   memory.record(state);
+  budget.recordCapture('structural');
   // Use diff engine for efficient updates
   const update = diffEngine.computeUpdate(state);
   return JSON.stringify(update || state, null, 2);
@@ -201,7 +227,13 @@ async function handleGetAmbient() {
 }
 
 async function handleTakeScreenshot() {
-  const result = await captureScreenshotBase64();
+  // Use budget-recommended quality
+  const mode = budget.getRecommendedMode();
+  if (!mode.screenshotQuality) {
+    return "Budget exceeded — screenshots disabled. Use get_screen_state for text-only state, or set_budget to increase limit.";
+  }
+  const result = await captureScreenshotBase64(mode.screenshotQuality);
+  budget.recordScreenshot(mode.screenshotQuality);
   if (!result) {
     return "Error: Screenshot failed. Check Screen Recording permissions.";
   }
@@ -309,6 +341,43 @@ async function handleGetSessionStats() {
   ].join('\n');
 }
 
+// ── Budget Handlers ──
+
+async function handleGetBudget() {
+  const stats = budget.getStats();
+  const lines = [
+    `Budget: ${stats.preset} ($${stats.budget.maxPerHour === Infinity ? '∞' : stats.budget.maxPerHour.toFixed(2)}/hr)`,
+    `Model: ${stats.model} ($${stats.pricePerMillion}/M tokens)`,
+    ``,
+    `This hour: $${stats.budget.currentHourlyCost.toFixed(4)} / $${stats.budget.maxPerHour === Infinity ? '∞' : stats.budget.maxPerHour.toFixed(2)} (${stats.budget.percentUsed}%)`,
+    `Session total: $${stats.session.totalCost.toFixed(4)} over ${stats.session.durationMinutes} min`,
+    `Captures: ${stats.session.captures} | Screenshots: ${stats.session.screenshots}`,
+    `Tokens: ${stats.session.totalInputTokens} input + ${stats.session.totalOutputTokens} output`,
+    ``,
+    `Recommended mode: ${stats.recommended.capture}`,
+    `Screenshot quality: ${stats.recommended.screenshotQuality || 'DISABLED'}`,
+    `Capture interval: ${stats.recommended.interval / 1000}s`,
+    stats.recommended.warning ? `⚠ ${stats.recommended.warning}` : '',
+  ].filter(Boolean);
+  return lines.join('\n');
+}
+
+async function handleSetBudget(args) {
+  const newBudget = new TokenBudget({
+    budget: args.preset,
+    model: budget.model,
+  });
+  // Preserve session history
+  newBudget.totalInputTokens = budget.totalInputTokens;
+  newBudget.totalOutputTokens = budget.totalOutputTokens;
+  newBudget.captures = budget.captures;
+  newBudget.screenshots = budget.screenshots;
+  newBudget.hourlyWindow = budget.hourlyWindow;
+  newBudget.sessionStart = budget.sessionStart;
+  Object.assign(budget, newBudget);
+  return `Budget changed to ${args.preset} ($${budget.preset.maxPerHour === Infinity ? '∞' : budget.preset.maxPerHour.toFixed(2)}/hr)`;
+}
+
 const TOOL_HANDLERS = {
   get_screen_state: handleGetScreenState,
   get_ambient: handleGetAmbient,
@@ -323,6 +392,8 @@ const TOOL_HANDLERS = {
   recall_screen: handleRecallScreen,
   get_recent_screens: handleGetRecentScreens,
   get_session_stats: handleGetSessionStats,
+  get_budget: handleGetBudget,
+  set_budget: handleSetBudget,
 };
 
 // ============================================================
