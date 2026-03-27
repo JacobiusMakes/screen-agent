@@ -16,13 +16,21 @@ const execP = promisify(exec);
 let nutjs = null;
 let useNutJs = false;
 
-// Try to load nut.js — graceful fallback if not installed
-try {
-  nutjs = await import('@nut-tree-fork/nut-js');
-  useNutJs = true;
-} catch {
-  // nut.js not installed — use AppleScript fallback
+// On macOS, prefer CGEvent/AppleScript for mouse — nut.js silently fails
+// to move the cursor on many macOS configs (permission inheritance issue
+// where the Accessibility grant doesn't propagate to the nut.js native addon).
+// nut.js keyboard may still be used if it works.
+const isMacOS = process.platform === 'darwin';
+
+if (!isMacOS) {
+  try {
+    nutjs = await import('@nut-tree-fork/nut-js');
+    useNutJs = true;
+  } catch {
+    // nut.js not installed — use AppleScript fallback
+  }
 }
+// On macOS we always use CGEvent/AppleScript — it's proven reliable
 
 /** Action log for audit trail */
 const actionLog = [];
