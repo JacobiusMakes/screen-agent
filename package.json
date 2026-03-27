@@ -14,8 +14,9 @@
     "test": "node --test 'test/**/*.test.js'"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.80.0",
+    "@modelcontextprotocol/sdk": "^1.28.0",
     "commander": "^12.0.0"
   },
-  "devDependencies": {},
   "license": "MIT"
 }
