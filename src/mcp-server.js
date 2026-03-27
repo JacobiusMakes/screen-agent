@@ -25,6 +25,13 @@ import {
   ListToolsRequestSchema,
 } from "@modelcontextprotocol/sdk/types.js";
 import { captureState, captureAmbient, captureScreenshot, captureScreenshotBase64 } from './capture/bridge.js';
+import { moveCursor, click, typeText, keyPress, scroll, getCapabilities, getActionLog } from './input/injector.js';
+import { SessionMemory } from './state/session-memory.js';
+import { DiffEngine } from './state/diff-engine.js';
+
+// Session-level instances
+const memory = new SessionMemory({ maxEntries: 500 });
+const diffEngine = new DiffEngine();
 
 // ============================================================
 //  Tool Definitions
@@ -76,6 +83,97 @@ const TOOLS = [
       properties: {},
     },
   },
+  // ── Input Tools ──
+  {
+    name: "move_cursor",
+    description: "Move the mouse cursor to a screen position. The user will see the cursor move.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        x: { type: "number", description: "X coordinate (pixels from left)" },
+        y: { type: "number", description: "Y coordinate (pixels from top)" },
+      },
+      required: ["x", "y"],
+    },
+  },
+  {
+    name: "click",
+    description: "Click at a screen position. Moves cursor there first. Use 'left' for normal click, 'right' for context menu, 'double' for double-click.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        x: { type: "number", description: "X coordinate" },
+        y: { type: "number", description: "Y coordinate" },
+        button: { type: "string", enum: ["left", "right", "double"], description: "Click type (default: left)" },
+      },
+      required: ["x", "y"],
+    },
+  },
+  {
+    name: "type_text",
+    description: "Type text at the current cursor position, as if typed on the keyboard.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string", description: "Text to type" },
+      },
+      required: ["text"],
+    },
+  },
+  {
+    name: "key_press",
+    description: "Press a keyboard shortcut. Format: 'cmd+s', 'ctrl+shift+p', 'enter', 'tab', 'escape'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        keys: { type: "string", description: "Key combo (e.g. 'cmd+s', 'enter', 'ctrl+shift+p')" },
+      },
+      required: ["keys"],
+    },
+  },
+  {
+    name: "scroll",
+    description: "Scroll at the current cursor position.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        direction: { type: "string", enum: ["up", "down", "left", "right"], description: "Scroll direction" },
+        amount: { type: "number", description: "Scroll amount in lines (default: 3)" },
+      },
+      required: ["direction"],
+    },
+  },
+  // ── Memory Tools ──
+  {
+    name: "recall_screen",
+    description: "Search session memory for past screen states matching a query. Returns what was on screen at relevant moments. Example: 'the error message from earlier' or 'when I was in Settings'.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        query: { type: "string", description: "What to search for in screen history" },
+        limit: { type: "number", description: "Max results (default: 5)" },
+      },
+      required: ["query"],
+    },
+  },
+  {
+    name: "get_recent_screens",
+    description: "Get the last N screen states from session memory. Useful for understanding recent context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        count: { type: "number", description: "Number of recent states (default: 5)" },
+      },
+    },
+  },
+  {
+    name: "get_session_stats",
+    description: "Get stats about the current screen-agent session: memory entries, unique apps visited, session duration.",
+    inputSchema: {
+      type: "object",
+      properties: {},
+    },
+  },
 ];
 
 // ============================================================
@@ -87,7 +185,11 @@ async function handleGetScreenState() {
   if (!state) {
     return "Error: Could not capture screen state. Check Accessibility permissions.";
   }
-  return JSON.stringify(state, null, 2);
+  // Auto-record to session memory
+  memory.record(state);
+  // Use diff engine for efficient updates
+  const update = diffEngine.computeUpdate(state);
+  return JSON.stringify(update || state, null, 2);
 }
 
 async function handleGetAmbient() {
@@ -141,12 +243,86 @@ async function handleEstimateTokens() {
   ].join('\n');
 }
 
+// ── Input Handlers ──
+
+async function handleMoveCursor(args) {
+  const result = await moveCursor(args.x, args.y);
+  return result.success ? `Cursor moved to (${args.x}, ${args.y})` : `Failed: ${result.error}`;
+}
+
+async function handleClick(args) {
+  const result = await click(args.x, args.y, args.button || 'left');
+  return result.success ? `Clicked ${args.button || 'left'} at (${args.x}, ${args.y})` : `Failed: ${result.error}`;
+}
+
+async function handleTypeText(args) {
+  const result = await typeText(args.text);
+  return result.success ? `Typed ${result.length} characters` : `Failed: ${result.error}`;
+}
+
+async function handleKeyPress(args) {
+  const result = await keyPress(args.keys);
+  return result.success ? `Pressed ${args.keys}` : `Failed: ${result.error}`;
+}
+
+async function handleScroll(args) {
+  const result = await scroll(args.direction, args.amount || 3);
+  return result.success ? `Scrolled ${args.direction} ${args.amount || 3} lines` : `Failed: ${result.error}`;
+}
+
+// ── Memory Handlers ──
+
+async function handleRecallScreen(args) {
+  const results = memory.search(args.query, args.limit || 5);
+  if (results.length === 0) return `No matching screen states found for "${args.query}"`;
+
+  return results.map(r => {
+    const ago = Math.round((Date.now() - r.ts) / 1000);
+    return `[${ago}s ago] ${r.state.app} — ${r.state.title || '(no title)'}\n  Score: ${r.score.toFixed(3)}\n  ${r.text.substring(0, 200)}`;
+  }).join('\n\n');
+}
+
+async function handleGetRecentScreens(args) {
+  const recent = memory.getRecent(args?.count || 5);
+  if (recent.length === 0) return 'No screen states recorded yet.';
+
+  return recent.map(r => {
+    const ago = Math.round((Date.now() - r.ts) / 1000);
+    return `[${ago}s ago] ${r.state.app} — ${r.state.title || '(no title)'}`;
+  }).join('\n');
+}
+
+async function handleGetSessionStats() {
+  const stats = memory.getStats();
+  const caps = getCapabilities();
+  const log = getActionLog();
+
+  return [
+    `Session Memory: ${stats.entries} states recorded`,
+    `Max capacity: ${stats.maxEntries}`,
+    stats.oldestMs ? `Oldest: ${Math.round(stats.oldestMs / 1000)}s ago` : 'No data yet',
+    `Apps visited: ${stats.uniqueApps.join(', ') || 'none'}`,
+    ``,
+    `Input backend: ${caps.backend}`,
+    `Actions taken this session: ${log.length}`,
+    `Last action: ${log.length > 0 ? log[log.length-1].action : 'none'}`,
+  ].join('\n');
+}
+
 const TOOL_HANDLERS = {
   get_screen_state: handleGetScreenState,
   get_ambient: handleGetAmbient,
   take_screenshot: handleTakeScreenshot,
   get_screenshot_path: handleGetScreenshotPath,
   estimate_tokens: handleEstimateTokens,
+  move_cursor: handleMoveCursor,
+  click: handleClick,
+  type_text: handleTypeText,
+  key_press: handleKeyPress,
+  scroll: handleScroll,
+  recall_screen: handleRecallScreen,
+  get_recent_screens: handleGetRecentScreens,
+  get_session_stats: handleGetSessionStats,
 };
 
 // ============================================================
