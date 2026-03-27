@@ -1,0 +1,21 @@
+{
+  "name": "screen-agent",
+  "version": "0.1.0",
+  "description": "AI screen understanding — captures screen state for LLM context. Terminal-first, token-efficient.",
+  "type": "module",
+  "bin": {
+    "screen-agent": "bin/screen-agent.js"
+  },
+  "scripts": {
+    "start": "node bin/screen-agent.js",
+    "watch": "node bin/screen-agent.js --watch",
+    "screenshot": "node bin/screen-agent.js --screenshot",
+    "mcp": "node src/mcp-server.js",
+    "test": "node --test 'test/**/*.test.js'"
+  },
+  "dependencies": {
+    "commander": "^12.0.0"
+  },
+  "devDependencies": {},
+  "license": "MIT"
+}
