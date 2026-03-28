@@ -114,13 +114,15 @@ wade tokens             # Estimate token cost
 
 ---
 
-## 15 MCP Tools
+## 17 MCP Tools
 
 | Phase | Tool | Cost | What it does |
 |-------|------|------|-------------|
 | 👁️ WATCH | `get_ambient` | ~5 tok | App name, window title, cursor position |
 | 👁️ WATCH | `get_screen_state` | ~150 tok | Full accessibility tree with UI elements |
 | 👁️ WATCH | `take_screenshot` | ~85-800 tok | JPEG screenshot (auto quality by budget) |
+| 👁️ WATCH | `selective_screenshot` | ~30-200 tok | User selects a region — 70-85% cheaper than full |
+| 👁️ WATCH | `auto_crop_screenshot` | ~20-150 tok | Auto-captures just the focused element |
 | 👁️ WATCH | `get_screenshot_path` | 0 tok | Save screenshot to file, return path |
 | 🧠 ASSESS | `estimate_tokens` | ~150 tok | Cost analysis of current screen state |
 | 🧠 ASSESS | `recall_screen` | 0 tok | Search session memory for past states |

@@ -215,6 +215,184 @@ export async function captureScreenshotBase64(quality = 'medium') {
   }
 }
 
+// ============================================================
+//  Selective Screenshot (user picks region)
+// ============================================================
+
+/**
+ * Prompt the user to select a screen region, capture it, compress,
+ * return as base64. If the user presses Escape, returns null.
+ *
+ * This uses `screencapture -i` which blocks until the user completes
+ * the selection or cancels. No file watchers needed.
+ *
+ * @param {'low'|'medium'|'high'|'full'} [quality='medium']
+ * @returns {{ type, image, sizeKB, resolution, ... } | null}
+ */
+export async function captureSelectiveBase64(quality = 'medium') {
+  const preset = QUALITY_PRESETS[quality] || QUALITY_PRESETS.medium;
+  const rawPath = join(tmpdir(), `wade-selective-${Date.now()}.png`);
+  const outPath = join(tmpdir(), `wade-selective-${Date.now()}.jpg`);
+
+  try {
+    // -i = interactive selection, -s = selection mode only (no window capture)
+    const { stderr } = await execFileP('screencapture', ['-i', '-s', '-t', 'png', rawPath], {
+      timeout: 60000, // user might take a while to select
+    });
+
+    // If user cancelled (Escape), screencapture exits 0 but no file
+    const { stat } = await import('node:fs/promises');
+    try {
+      await stat(rawPath);
+    } catch {
+      return null; // user cancelled
+    }
+
+    // Compress with sips
+    if (preset.width > 0) {
+      // Get the actual dimensions of the selection to scale proportionally
+      const { stdout: dimOut } = await execFileP('sips', ['-g', 'pixelWidth', '-g', 'pixelHeight', rawPath], { timeout: 3000 });
+      const wMatch = dimOut.match(/pixelWidth:\s*(\d+)/);
+      const hMatch = dimOut.match(/pixelHeight:\s*(\d+)/);
+      const origW = wMatch ? parseInt(wMatch[1]) : 1920;
+      const origH = hMatch ? parseInt(hMatch[1]) : 1080;
+
+      // Scale down only if selection is larger than preset
+      if (origW > preset.width || origH > preset.height) {
+        const scale = Math.min(preset.width / origW, preset.height / origH);
+        const newW = Math.round(origW * scale);
+        const newH = Math.round(origH * scale);
+        await execFileP('sips', [
+          '-z', String(newH), String(newW),
+          '-s', 'format', 'jpeg',
+          '-s', 'formatOptions', String(preset.quality),
+          rawPath, '--out', outPath,
+        ], { timeout: 5000 });
+      } else {
+        // Selection is small enough — just compress
+        await execFileP('sips', [
+          '-s', 'format', 'jpeg',
+          '-s', 'formatOptions', String(preset.quality),
+          rawPath, '--out', outPath,
+        ], { timeout: 5000 });
+      }
+    } else {
+      await execFileP('sips', [
+        '-s', 'format', 'jpeg',
+        '-s', 'formatOptions', String(preset.quality),
+        rawPath, '--out', outPath,
+      ], { timeout: 5000 });
+    }
+
+    const buffer = await readFile(outPath);
+
+    // Always clean up temp files
+    await unlink(rawPath).catch(() => {});
+    await unlink(outPath).catch(() => {});
+
+    return {
+      type: "selective_screenshot",
+      ts: Date.now(),
+      format: "jpeg",
+      quality,
+      sizeBytes: buffer.length,
+      sizeKB: Math.round(buffer.length / 1024),
+      image: buffer.toString('base64'),
+    };
+  } catch (err) {
+    await unlink(rawPath).catch(() => {});
+    await unlink(outPath).catch(() => {});
+    if (err.code === 'ERR_CHILD_PROCESS_STDIO_MAXBUFFER') return null;
+    console.error(`Selective screenshot failed: ${err.message}`);
+    return null;
+  }
+}
+
+// ============================================================
+//  Auto-Crop Screenshot (capture focused element region)
+// ============================================================
+
+/**
+ * Capture a screenshot of just the focused element's bounding region.
+ * Uses the accessibility tree to find the focused element, then
+ * screencapture -R to grab just that rect.
+ *
+ * @param {number} [padding=20] — extra pixels around the element
+ * @param {'low'|'medium'|'high'|'full'} [quality='medium']
+ */
+export async function captureAutoCropBase64(padding = 20, quality = 'medium') {
+  const preset = QUALITY_PRESETS[quality] || QUALITY_PRESETS.medium;
+  const outPath = join(tmpdir(), `wade-crop-${Date.now()}.jpg`);
+
+  try {
+    // Get focused element bounds via JXA
+    const { stdout } = await execFileP('osascript', ['-l', 'JavaScript', '-e', `
+      const se = Application("System Events");
+      const proc = se.processes.whose({frontmost: true})[0];
+      const wins = proc.windows();
+      if (wins.length === 0) { JSON.stringify(null); }
+      else {
+        // Try focused element first
+        let el;
+        try { el = proc.focusedUIElement(); } catch(e) {}
+        if (!el) {
+          // Fall back to window bounds
+          const p = wins[0].position();
+          const s = wins[0].size();
+          JSON.stringify({ x: p[0], y: p[1], w: s[0], h: s[1] });
+        } else {
+          const p = el.position();
+          const s = el.size();
+          JSON.stringify({ x: p[0], y: p[1], w: s[0], h: s[1] });
+        }
+      }
+    `], { timeout: 3000 });
+
+    const bounds = JSON.parse(stdout.trim());
+    if (!bounds) return null;
+
+    // Add padding and clamp to screen
+    const x = Math.max(0, bounds.x - padding);
+    const y = Math.max(0, bounds.y - padding);
+    const w = bounds.w + padding * 2;
+    const h = bounds.h + padding * 2;
+
+    // Capture just that region
+    const rawPath = join(tmpdir(), `wade-crop-raw-${Date.now()}.png`);
+    await execFileP('screencapture', [
+      '-x', '-t', 'png',
+      '-R', `${x},${y},${w},${h}`,
+      rawPath,
+    ], { timeout: 5000 });
+
+    // Compress
+    await execFileP('sips', [
+      '-s', 'format', 'jpeg',
+      '-s', 'formatOptions', String(preset.quality),
+      rawPath, '--out', outPath,
+    ], { timeout: 5000 });
+
+    const buffer = await readFile(outPath);
+    await unlink(rawPath).catch(() => {});
+    await unlink(outPath).catch(() => {});
+
+    return {
+      type: "auto_crop_screenshot",
+      ts: Date.now(),
+      format: "jpeg",
+      quality,
+      region: { x, y, w, h },
+      sizeBytes: buffer.length,
+      sizeKB: Math.round(buffer.length / 1024),
+      image: buffer.toString('base64'),
+    };
+  } catch (err) {
+    await unlink(outPath).catch(() => {});
+    console.error(`Auto-crop screenshot failed: ${err.message}`);
+    return null;
+  }
+}
+
 /**
  * Watch screen state continuously, yielding on changes.
  */

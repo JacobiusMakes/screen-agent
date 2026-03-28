@@ -442,11 +442,91 @@ async function handleSpecialCommand(input) {
     process.exit(0);
   }
 
+  // ── /config ──
+  if (cmd.startsWith('/config')) {
+    const parts = input.trim().split(/\s+/);
+    const key = parts[1]?.toLowerCase();
+    const val = parts[2]?.toLowerCase();
+    const cfg = loadConfig();
+
+    if (!key) {
+      // Show current config
+      console.log(`${c.bold}Wade Config${c.reset} ${c.dim}(${CONFIG_PATH})${c.reset}\n`);
+      console.log(`  ${c.bold}auto-delete${c.reset}   ${cfg.autoDeleteScreenshots ? `${c.green}on${c.reset}` : `${c.dim}off${c.reset}`}`);
+      console.log(`  ${c.dim}  Delete screenshots after Wade absorbs context${c.reset}`);
+      console.log(`  ${c.bold}screenshot${c.reset}    ${cfg.screenshotMode || 'full'}`);
+      console.log(`  ${c.dim}  Mode: full | selective | auto-crop${c.reset}`);
+      console.log(`  ${c.bold}quality${c.reset}       ${cfg.screenshotQuality || 'medium'}`);
+      console.log(`  ${c.dim}  Quality: low | medium | high${c.reset}`);
+      console.log(`  ${c.bold}plan${c.reset}          ${cfg.plan || 'max5x'}`);
+      console.log('');
+      console.log(`${c.dim}Set with: /config <key> <value>${c.reset}`);
+      console.log(`${c.dim}Example: /config auto-delete on${c.reset}`);
+      return true;
+    }
+
+    if (key === 'auto-delete') {
+      cfg.autoDeleteScreenshots = val === 'on' || val === 'true' || val === '1';
+      saveConfig(cfg);
+      console.log(`${c.green}auto-delete: ${cfg.autoDeleteScreenshots ? 'on' : 'off'}${c.reset}`);
+      if (cfg.autoDeleteScreenshots) {
+        console.log(`${c.dim}Screenshots will be deleted after Wade processes them.${c.reset}`);
+      }
+      return true;
+    }
+
+    if (key === 'screenshot') {
+      const modes = ['full', 'selective', 'auto-crop'];
+      if (!modes.includes(val)) {
+        console.error(`${c.red}Invalid mode. Use: full, selective, or auto-crop${c.reset}`);
+        return true;
+      }
+      cfg.screenshotMode = val;
+      saveConfig(cfg);
+      console.log(`${c.green}screenshot mode: ${val}${c.reset}`);
+      if (val === 'selective') {
+        console.log(`${c.dim}Wade will prompt you to select a region (crosshairs) when a screenshot is needed.${c.reset}`);
+      } else if (val === 'auto-crop') {
+        console.log(`${c.dim}Wade will auto-capture only the focused element. No user interaction needed.${c.reset}`);
+      }
+      return true;
+    }
+
+    if (key === 'quality') {
+      const qualities = ['low', 'medium', 'high'];
+      if (!qualities.includes(val)) {
+        console.error(`${c.red}Invalid quality. Use: low, medium, or high${c.reset}`);
+        return true;
+      }
+      cfg.screenshotQuality = val;
+      saveConfig(cfg);
+      console.log(`${c.green}quality: ${val}${c.reset}`);
+      return true;
+    }
+
+    if (key === 'plan') {
+      const plans = ['pro', 'max5x', 'max20x', 'team', 'api'];
+      if (!plans.includes(val)) {
+        console.error(`${c.red}Invalid plan. Use: pro, max5x, max20x, team, or api${c.reset}`);
+        return true;
+      }
+      cfg.plan = val;
+      saveConfig(cfg);
+      plan = PLANS[val];
+      console.log(`${c.green}plan: ${plan.name}${c.reset}`);
+      return true;
+    }
+
+    console.error(`${c.red}Unknown config key "${key}". Run /config to see options.${c.reset}`);
+    return true;
+  }
+
   if (cmd === '/help') {
     console.log(`${c.bold}Commands:${c.reset}`);
     console.log('  /state       Print current screen state (JSON)');
     console.log('  /budget      Show token budget and costs');
     console.log('  /screenshot  Save screenshot to file');
+    console.log('  /config      View/set Wade config (auto-delete, screenshot mode, etc.)');
     console.log('  /quit        Exit');
     console.log('');
     console.log('Anything else is sent as natural language to Claude.');

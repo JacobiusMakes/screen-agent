@@ -10,7 +10,7 @@
  *   const result = await handlers.click({ x: 500, y: 400 });
  */
 
-import { captureState, captureAmbient, captureScreenshot, captureScreenshotBase64 } from '../capture/bridge.js';
+import { captureState, captureAmbient, captureScreenshot, captureScreenshotBase64, captureSelectiveBase64, captureAutoCropBase64 } from '../capture/bridge.js';
 import { moveCursor, click, typeText, keyPress, scroll, getCapabilities, getActionLog } from '../input/injector.js';
 
 // ============================================================
@@ -47,6 +47,27 @@ export const TOOLS = [
     name: "estimate_tokens",
     description: "Estimate how many tokens the current screen state would cost to send to an LLM. Useful for cost awareness.",
     inputSchema: { type: "object", properties: {} },
+  },
+  {
+    name: "selective_screenshot",
+    description: "Prompt the user to select a screen region, then capture just that area. Much cheaper than a full screenshot (~70-85% token savings). Use when you need visual detail of a specific area. The user will see crosshairs to drag-select. Returns null if user cancels (Escape).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        quality: { type: "string", enum: ["low", "medium", "high"], description: "Compression quality (default: medium)" },
+      },
+    },
+  },
+  {
+    name: "auto_crop_screenshot",
+    description: "Capture a screenshot of just the currently focused UI element. Zero user interaction — automatically detects the focused element's bounds and captures only that region. Ideal for reading form fields, buttons, or specific UI components without capturing the full screen.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        padding: { type: "number", description: "Extra pixels around the element (default: 20)" },
+        quality: { type: "string", enum: ["low", "medium", "high"], description: "Compression quality (default: medium)" },
+      },
+    },
   },
   // ── Input Tools ──
   {
@@ -183,13 +204,31 @@ export function createToolHandlers({ memory, diffEngine, budget }) {
     return JSON.stringify(state);
   }
 
-  async function handleTakeScreenshot() {
+  async function handleTakeScreenshot(args) {
     const mode = budget.getRecommendedMode();
     if (!mode.screenshotQuality) {
       return "Budget exceeded — screenshots disabled. Use get_screen_state for text-only state, or set_budget to increase limit.";
     }
-    const result = await captureScreenshotBase64(mode.screenshotQuality);
-    budget.recordScreenshot(mode.screenshotQuality);
+
+    // Check if a preferred screenshot mode is set
+    const screenshotMode = args?._screenshotMode || 'full';
+    const quality = mode.screenshotQuality;
+
+    let result;
+    if (screenshotMode === 'selective') {
+      result = await captureSelectiveBase64(quality);
+      if (!result) return "User cancelled the selection. Try again or use a full screenshot.";
+    } else if (screenshotMode === 'auto-crop') {
+      result = await captureAutoCropBase64(20, quality);
+      if (!result) {
+        // Fall back to full screenshot
+        result = await captureScreenshotBase64(quality);
+      }
+    } else {
+      result = await captureScreenshotBase64(quality);
+    }
+
+    budget.recordScreenshot(quality);
     if (!result) return "Error: Screenshot failed. Check Screen Recording permissions.";
     return { type: "image", data: result.image, mimeType: "image/jpeg" };
   }
@@ -215,6 +254,23 @@ export function createToolHandlers({ memory, diffEngine, budget }) {
       `Cost per capture (Sonnet @ $3/M): $${(estimatedTokens * 3 / 1000000).toFixed(6)}`,
       `Cost per hour (30s interval): $${(estimatedTokens * 120 * 3 / 1000000).toFixed(4)}`,
     ].join('\n');
+  }
+
+  async function handleSelectiveScreenshot(args) {
+    const quality = args?.quality || 'medium';
+    const result = await captureSelectiveBase64(quality);
+    if (!result) return "User cancelled the selection (pressed Escape), or screenshot failed.";
+    budget.recordScreenshot(quality);
+    return { type: "image", data: result.image, mimeType: "image/jpeg" };
+  }
+
+  async function handleAutoCropScreenshot(args) {
+    const padding = args?.padding || 20;
+    const quality = args?.quality || 'medium';
+    const result = await captureAutoCropBase64(padding, quality);
+    if (!result) return "Could not detect focused element or capture failed.";
+    budget.recordScreenshot(quality);
+    return { type: "image", data: result.image, mimeType: "image/jpeg" };
   }
 
   // ── Input Handlers ──
@@ -319,6 +375,8 @@ export function createToolHandlers({ memory, diffEngine, budget }) {
     get_ambient: handleGetAmbient,
     take_screenshot: handleTakeScreenshot,
     get_screenshot_path: handleGetScreenshotPath,
+    selective_screenshot: handleSelectiveScreenshot,
+    auto_crop_screenshot: handleAutoCropScreenshot,
     estimate_tokens: handleEstimateTokens,
     move_cursor: handleMoveCursor,
     click: handleClick,
