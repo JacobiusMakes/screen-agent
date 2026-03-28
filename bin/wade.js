@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 
 /**
- * screen-agent — AI screen understanding from the terminal
+ * WADE — Watchful Autonomous Decision Entity
  *
- * Captures your screen state (accessibility tree, window info, cursor)
- * and outputs token-efficient JSON for LLM consumption.
+ * Your AI's eyes, hands, and instincts on macOS.
+ * Operates using the WADE Protocol: Watch → Assess → Decide → Execute
  *
  * Commands:
- *   screen-agent state          One-shot: print current screen state
- *   screen-agent ambient        Lightweight: app name + title + cursor
- *   screen-agent watch          Continuous: stream state changes
- *   screen-agent screenshot     Capture screenshot, save to file
- *   screen-agent tokens         Estimate token count for current state
- *   screen-agent mcp            Start MCP server for Claude Code integration
+ *   wade state          Capture current screen state
+ *   wade ambient        Lightweight: app + title + cursor (~5 tokens)
+ *   wade watch          Stream state changes continuously
+ *   wade screenshot     Capture screenshot to file
+ *   wade tokens         Estimate token cost of current state
+ *   wade chat           Natural language REPL — talk to your screen
  */
 
 import { Command } from 'commander';
@@ -21,13 +21,13 @@ import { captureState, captureAmbient, captureScreenshot, watchState } from '../
 const program = new Command();
 
 program
-  .name('screen-agent')
-  .description('AI screen understanding — capture screen state for LLM context')
-  .version('0.1.0');
+  .name('wade')
+  .description('WADE — Watchful Autonomous Decision Entity. Watch → Assess → Decide → Execute.')
+  .version('0.2.0');
 
 program
   .command('state')
-  .description('Capture current screen state (accessibility tree + cursor + focused app)')
+  .description('WATCH — Capture current screen state (accessibility tree + cursor + focused app)')
   .option('--pretty', 'Pretty-print JSON output')
   .option('--max-elements <n>', 'Max UI elements to extract', '60')
   .action(async (opts) => {
@@ -42,7 +42,7 @@ program
 
 program
   .command('ambient')
-  .description('Lightweight state: app name + window title + cursor position (~5 tokens)')
+  .description('WATCH (light) — App name + window title + cursor position (~5 tokens)')
   .action(async () => {
     const state = await captureAmbient();
     if (!state) {
@@ -54,15 +54,15 @@ program
 
 program
   .command('watch')
-  .description('Stream screen state changes continuously')
+  .description('WATCH (continuous) — Stream screen state changes')
   .option('--interval <ms>', 'Poll interval in milliseconds', '2000')
   .option('--ambient-only', 'Only emit lightweight ambient states')
   .action(async (opts) => {
     const interval = parseInt(opts.interval);
     const ambientOnly = opts.ambientOnly;
 
-    console.error(`[screen-agent] Watching screen (${interval}ms interval)...`);
-    console.error('[screen-agent] Press Ctrl+C to stop.\n');
+    console.error(`[wade] Watching screen (${interval}ms interval)...`);
+    console.error('[wade] Press Ctrl+C to stop.\n');
 
     for await (const state of watchState({ interval, ambientOnly })) {
       console.log(JSON.stringify(state));
@@ -71,7 +71,7 @@ program
 
 program
   .command('screenshot')
-  .description('Capture a screenshot and save to file')
+  .description('WATCH (visual) — Capture screenshot and save to file')
   .option('-o, --output <path>', 'Output file path')
   .action(async (opts) => {
     const result = await captureScreenshot(opts.output);
@@ -84,7 +84,7 @@ program
 
 program
   .command('tokens')
-  .description('Estimate token count for current screen state')
+  .description('ASSESS — Estimate token cost of current screen state')
   .action(async () => {
     const state = await captureState();
     if (!state) {
@@ -93,7 +93,6 @@ program
     }
 
     const json = JSON.stringify(state);
-    // Rough token estimate: ~4 chars per token for structured JSON
     const estimatedTokens = Math.ceil(json.length / 4);
 
     console.log(`Screen state size: ${json.length} chars`);
@@ -106,6 +105,17 @@ program
     console.log(`  Single capture: $${(estimatedTokens * 3 / 1000000).toFixed(6)}`);
     console.log(`  Per minute (30s interval): $${(estimatedTokens * 2 * 3 / 1000000).toFixed(6)}`);
     console.log(`  Per hour: $${(estimatedTokens * 120 * 3 / 1000000).toFixed(4)}`);
+  });
+
+program
+  .command('chat')
+  .description('EXECUTE — Natural language REPL, talk to your screen with Claude')
+  .option('--model <model>', 'Override Claude model', process.env.WADE_CHAT_MODEL || 'claude-sonnet-4-6')
+  .option('--budget <preset>', 'Budget preset', process.env.WADE_BUDGET || 'normal')
+  .action(async (opts) => {
+    if (opts.model) process.env.SCREEN_AGENT_CHAT_MODEL = opts.model;
+    if (opts.budget) process.env.SCREEN_AGENT_BUDGET = opts.budget;
+    await import('./wade-chat.js');
   });
 
 if (process.argv.length <= 2) {

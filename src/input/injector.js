@@ -4,22 +4,20 @@
  * Uses nut.js when available (best cross-platform support).
  * Falls back to AppleScript/osascript on macOS.
  *
- * All actions are logged for safety/audit and can be previewed
- * before execution via the confirmation flow.
+ * SECURITY: All shell commands use execFile() with argument arrays
+ * to prevent injection. Numeric inputs are validated before use.
  */
 
-import { exec } from 'node:child_process';
+import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { showMove, showClick } from '../overlay/highlight.js';
 
-const execP = promisify(exec);
+const execFileP = promisify(execFile);
 
 let nutjs = null;
 let useNutJs = false;
 
 // On macOS, prefer CGEvent/AppleScript for mouse — nut.js silently fails
-// to move the cursor on many macOS configs (permission inheritance issue
-// where the Accessibility grant doesn't propagate to the nut.js native addon).
-// nut.js keyboard may still be used if it works.
 const isMacOS = process.platform === 'darwin';
 
 if (!isMacOS) {
@@ -30,16 +28,18 @@ if (!isMacOS) {
     // nut.js not installed — use AppleScript fallback
   }
 }
-// On macOS we always use CGEvent/AppleScript — it's proven reliable
 
 /** Action log for audit trail */
 const actionLog = [];
 
 function logAction(action, params, success = true) {
+  // SECURITY: redact typed text from logs
+  const safeParams = { ...params };
+  if (safeParams.text) safeParams.text = `[${safeParams.text.length} chars]`;
   actionLog.push({
     ts: Date.now(),
     action,
-    params,
+    params: safeParams,
     success,
     method: useNutJs ? 'nut.js' : 'applescript',
   });
@@ -54,19 +54,72 @@ export function clearActionLog() {
 }
 
 // ============================================================
+//  Input Validation
+// ============================================================
+
+function validateCoord(v, name) {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n < 0 || n > 20000) {
+    throw new Error(`Invalid ${name}: ${v} (must be 0-20000)`);
+  }
+  return Math.round(n);
+}
+
+function validateAmount(v) {
+  const n = Number(v) || 3;
+  return Math.min(Math.max(Math.round(n), 1), 100);
+}
+
+const VALID_DIRECTIONS = new Set(['up', 'down', 'left', 'right']);
+const VALID_BUTTONS = new Set(['left', 'right', 'double']);
+
+// ============================================================
+//  Python helper — execFile with argument array, no shell
+// ============================================================
+
+async function runPython(code, timeout = 3000) {
+  return execFileP('python3', ['-c', code], { timeout });
+}
+
+async function runOsascript(script, timeout = 3000) {
+  return execFileP('osascript', ['-e', script], { timeout });
+}
+
+// ============================================================
+//  Cursor Position (for highlight origin)
+// ============================================================
+
+async function getCursorPosition() {
+  try {
+    const code = `import Quartz; loc=Quartz.CGEventGetLocation(Quartz.CGEventCreate(None)); print(f'{int(loc.x)},{int(loc.y)}')`;
+    const { stdout } = await runPython(code, 2000);
+    const [cx, cy] = stdout.trim().split(',').map(Number);
+    return { x: cx, y: cy };
+  } catch {
+    return { x: 0, y: 0 };
+  }
+}
+
+// ============================================================
 //  Cursor Movement
 // ============================================================
 
 export async function moveCursor(x, y) {
   try {
+    x = validateCoord(x, 'x');
+    y = validateCoord(y, 'y');
+
+    const from = await getCursorPosition();
+    showMove([from.x, from.y], [x, y]);
+
     if (useNutJs) {
       await nutjs.mouse.setPosition({ x, y });
     } else {
-      // AppleScript: uses CoreGraphics via python one-liner
-      await execP(
-        `python3 -c "import Quartz; Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (${x}, ${y}), 0))"`,
-        { timeout: 3000 }
-      );
+      const code = [
+        'import Quartz',
+        `Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, (${x}, ${y}), 0))`,
+      ].join('; ');
+      await runPython(code);
     }
     logAction('move_cursor', { x, y });
     return { success: true, x, y };
@@ -82,6 +135,12 @@ export async function moveCursor(x, y) {
 
 export async function click(x, y, button = 'left') {
   try {
+    x = validateCoord(x, 'x');
+    y = validateCoord(y, 'y');
+    if (!VALID_BUTTONS.has(button)) button = 'left';
+
+    showClick([x, y], button);
+
     if (useNutJs) {
       await nutjs.mouse.setPosition({ x, y });
       if (button === 'right') {
@@ -92,43 +151,37 @@ export async function click(x, y, button = 'left') {
         await nutjs.mouse.leftClick();
       }
     } else {
-      // AppleScript fallback
-      const buttonMap = {
-        left: 'kCGEventLeftMouseDown, kCGEventLeftMouseUp',
-        right: 'kCGEventRightMouseDown, kCGEventRightMouseUp',
+      const eventMap = {
+        left:  ['kCGEventLeftMouseDown', 'kCGEventLeftMouseUp'],
+        right: ['kCGEventRightMouseDown', 'kCGEventRightMouseUp'],
       };
-      const [down, up] = (buttonMap[button] || buttonMap.left).split(', ');
+      const [down, up] = eventMap[button] || eventMap.left;
 
-      await execP(
-        `python3 -c "
-import Quartz, time
-pos = (${x}, ${y})
-Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, pos, 0))
-time.sleep(0.05)
-Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Quartz.${down}, pos, 0))
-time.sleep(0.05)
-Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Quartz.${up}, pos, 0))
-"`,
-        { timeout: 3000 }
-      );
+      const code = [
+        'import Quartz, time',
+        `pos = (${x}, ${y})`,
+        `Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventMouseMoved, pos, 0))`,
+        'time.sleep(0.05)',
+        `Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Quartz.${down}, pos, 0))`,
+        'time.sleep(0.05)',
+        `Quartz.CGEventPost(Quartz.kCGHIDEventTap, Quartz.CGEventCreateMouseEvent(None, Quartz.${up}, pos, 0))`,
+      ].join('\n');
+      await runPython(code);
 
       if (button === 'double') {
-        // Second click for double-click
-        await execP(
-          `python3 -c "
-import Quartz, time
-pos = (${x}, ${y})
-time.sleep(0.1)
-e = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, pos, 0)
-Quartz.CGEventSetIntegerValueField(e, Quartz.kCGMouseEventClickState, 2)
-Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
-time.sleep(0.05)
-e2 = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, pos, 0)
-Quartz.CGEventSetIntegerValueField(e2, Quartz.kCGMouseEventClickState, 2)
-Quartz.CGEventPost(Quartz.kCGHIDEventTap, e2)
-"`,
-          { timeout: 3000 }
-        );
+        const dblCode = [
+          'import Quartz, time',
+          `pos = (${x}, ${y})`,
+          'time.sleep(0.1)',
+          'e = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseDown, pos, 0)',
+          'Quartz.CGEventSetIntegerValueField(e, Quartz.kCGMouseEventClickState, 2)',
+          'Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)',
+          'time.sleep(0.05)',
+          'e2 = Quartz.CGEventCreateMouseEvent(None, Quartz.kCGEventLeftMouseUp, pos, 0)',
+          'Quartz.CGEventSetIntegerValueField(e2, Quartz.kCGMouseEventClickState, 2)',
+          'Quartz.CGEventPost(Quartz.kCGHIDEventTap, e2)',
+        ].join('\n');
+        await runPython(dblCode);
       }
     }
     logAction('click', { x, y, button });
@@ -145,21 +198,26 @@ Quartz.CGEventPost(Quartz.kCGHIDEventTap, e2)
 
 export async function typeText(text) {
   try {
+    if (typeof text !== 'string' || text.length === 0) {
+      throw new Error('Text must be a non-empty string');
+    }
+    if (text.length > 10000) {
+      throw new Error('Text too long (max 10000 chars)');
+    }
+
     if (useNutJs) {
       await nutjs.keyboard.type(text);
     } else {
-      // AppleScript: keystroke command
-      // Escape special chars for AppleScript string
+      // SECURITY: Use osascript with -e flag via execFile (no shell).
+      // AppleScript string escaping: backslash and double-quote.
       const escaped = text.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
-      await execP(
-        `osascript -e 'tell application "System Events" to keystroke "${escaped}"'`,
-        { timeout: 5000 }
-      );
+      const script = `tell application "System Events" to keystroke "${escaped}"`;
+      await runOsascript(script, 5000);
     }
-    logAction('type_text', { text: text.substring(0, 50) + (text.length > 50 ? '...' : '') });
+    logAction('type_text', { text });
     return { success: true, length: text.length };
   } catch (err) {
-    logAction('type_text', { text: text.substring(0, 20) }, false);
+    logAction('type_text', { text }, false);
     return { success: false, error: err.message };
   }
 }
@@ -175,22 +233,41 @@ const KEY_MAP = {
   'left': 'left arrow', 'right': 'right arrow',
 };
 
+const VALID_MODS = new Set(['cmd', 'command', 'ctrl', 'control', 'alt', 'option', 'shift']);
+const VALID_SINGLE_KEYS = new Set([
+  ...Object.keys(KEY_MAP),
+  ...'abcdefghijklmnopqrstuvwxyz0123456789'.split(''),
+  'f1','f2','f3','f4','f5','f6','f7','f8','f9','f10','f11','f12',
+]);
+
 export async function keyPress(keys) {
   try {
-    if (useNutJs) {
-      // Parse "cmd+s" format
-      const parts = keys.toLowerCase().split('+');
-      const modifiers = [];
-      let key = parts[parts.length - 1];
+    if (typeof keys !== 'string' || keys.length === 0) {
+      throw new Error('Keys must be a non-empty string');
+    }
 
-      for (const part of parts.slice(0, -1)) {
-        if (part === 'cmd' || part === 'command') modifiers.push(nutjs.Key.LeftCmd);
-        if (part === 'ctrl' || part === 'control') modifiers.push(nutjs.Key.LeftControl);
-        if (part === 'alt' || part === 'option') modifiers.push(nutjs.Key.LeftAlt);
-        if (part === 'shift') modifiers.push(nutjs.Key.LeftShift);
+    const parts = keys.toLowerCase().split('+');
+    const key = parts[parts.length - 1];
+    const mods = parts.slice(0, -1);
+
+    // Validate all parts
+    for (const mod of mods) {
+      if (!VALID_MODS.has(mod)) {
+        throw new Error(`Invalid modifier: "${mod}". Valid: cmd, ctrl, alt, shift`);
       }
+    }
+    if (!VALID_SINGLE_KEYS.has(key) && key.length !== 1) {
+      throw new Error(`Invalid key: "${key}"`);
+    }
 
-      // Map key names to nut.js keys
+    if (useNutJs) {
+      const modifiers = [];
+      for (const mod of mods) {
+        if (mod === 'cmd' || mod === 'command') modifiers.push(nutjs.Key.LeftCmd);
+        if (mod === 'ctrl' || mod === 'control') modifiers.push(nutjs.Key.LeftControl);
+        if (mod === 'alt' || mod === 'option') modifiers.push(nutjs.Key.LeftAlt);
+        if (mod === 'shift') modifiers.push(nutjs.Key.LeftShift);
+      }
       const nutKey = nutjs.Key[key.charAt(0).toUpperCase() + key.slice(1)] || nutjs.Key[key.toUpperCase()];
       if (nutKey) {
         if (modifiers.length) {
@@ -202,11 +279,6 @@ export async function keyPress(keys) {
         }
       }
     } else {
-      // Parse "cmd+s" into AppleScript
-      const parts = keys.toLowerCase().split('+');
-      const key = parts[parts.length - 1];
-      const mods = parts.slice(0, -1);
-
       const modFlags = mods.map(m => {
         if (m === 'cmd' || m === 'command') return 'command down';
         if (m === 'ctrl' || m === 'control') return 'control down';
@@ -218,17 +290,16 @@ export async function keyPress(keys) {
       const mappedKey = KEY_MAP[key] || key;
       const modStr = modFlags.length ? ` using {${modFlags.join(', ')}}` : '';
 
+      let script;
       if (mappedKey.length === 1) {
-        await execP(
-          `osascript -e 'tell application "System Events" to keystroke "${mappedKey}"${modStr}'`,
-          { timeout: 3000 }
-        );
+        // Single character — use keystroke (safe: validated above)
+        const escaped = mappedKey.replace(/\\/g, '\\\\').replace(/"/g, '\\"');
+        script = `tell application "System Events" to keystroke "${escaped}"${modStr}`;
       } else {
-        await execP(
-          `osascript -e 'tell application "System Events" to key code ${getKeyCode(mappedKey)}${modStr}'`,
-          { timeout: 3000 }
-        );
+        // Named key — use key code
+        script = `tell application "System Events" to key code ${getKeyCode(mappedKey)}${modStr}`;
       }
+      await runOsascript(script);
     }
     logAction('key_press', { keys });
     return { success: true, keys };
@@ -253,6 +324,9 @@ function getKeyCode(keyName) {
 
 export async function scroll(direction = 'down', amount = 3) {
   try {
+    if (!VALID_DIRECTIONS.has(direction)) direction = 'down';
+    amount = validateAmount(amount);
+
     if (useNutJs) {
       const dir = direction === 'up' || direction === 'left' ? -amount : amount;
       if (direction === 'left' || direction === 'right') {
@@ -263,14 +337,12 @@ export async function scroll(direction = 'down', amount = 3) {
     } else {
       const dy = direction === 'up' ? amount : direction === 'down' ? -amount : 0;
       const dx = direction === 'left' ? amount : direction === 'right' ? -amount : 0;
-      await execP(
-        `python3 -c "
-import Quartz
-e = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 2, ${dy}, ${dx})
-Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)
-"`,
-        { timeout: 3000 }
-      );
+      const code = [
+        'import Quartz',
+        `e = Quartz.CGEventCreateScrollWheelEvent(None, Quartz.kCGScrollEventUnitLine, 2, ${dy}, ${dx})`,
+        'Quartz.CGEventPost(Quartz.kCGHIDEventTap, e)',
+      ].join('\n');
+      await runPython(code);
     }
     logAction('scroll', { direction, amount });
     return { success: true, direction, amount };

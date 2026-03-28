@@ -1,16 +1,18 @@
 {
-  "name": "screen-agent",
-  "version": "0.1.0",
-  "description": "AI screen understanding — captures screen state for LLM context. Terminal-first, token-efficient.",
+  "name": "wade",
+  "version": "0.2.0",
+  "description": "WADE — Watchful Autonomous Decision Entity. Your AI's eyes, hands, and instincts on macOS.",
   "type": "module",
   "bin": {
-    "screen-agent": "bin/screen-agent.js"
+    "wade": "bin/wade.js",
+    "wade-chat": "bin/wade-chat.js"
   },
   "scripts": {
-    "start": "node bin/screen-agent.js",
-    "watch": "node bin/screen-agent.js --watch",
-    "screenshot": "node bin/screen-agent.js --screenshot",
+    "start": "node bin/wade.js",
+    "watch": "node bin/wade.js watch",
+    "screenshot": "node bin/wade.js screenshot",
     "mcp": "node src/mcp-server.js",
+    "chat": "node bin/wade-chat.js",
     "test": "node --test 'test/**/*.test.js'"
   },
   "dependencies": {
