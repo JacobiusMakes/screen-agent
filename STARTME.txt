@@ -1,0 +1,24 @@
+wade — WADE — Watchful Autonomous Decision Entity. Your AI's eyes, hands, and instincts on macOS.
+Stack: node, commander, @anthropic-ai/sdk, @modelcontextprotocol/sdk
+
+COMMANDS
+  start: node bin/wade.js
+  watch: node bin/wade.js watch
+  mcp: node src/mcp-server.js
+  chat: node bin/wade-chat.js
+  test: node --test 'test/**/*.test.js'
+
+ENTRY POINTS
+  wade → bin/wade.js
+  wade-chat → bin/wade-chat.js
+
+STRUCTURE
+  README.md
+  bin/ (2 files)
+  docs/ (1 files)
+  package.json
+  src/ (9 files)
+  swift-bridge/ (2 files)
+  test/ (4 files)
+
+DEPS: 4 runtime, 0 dev
